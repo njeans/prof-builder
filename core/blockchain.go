@@ -47,6 +47,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -2447,6 +2448,63 @@ func (bc *BlockChain) InsertHeaderChain(chain []*types.Header) (int, error) {
 func (bc *BlockChain) SetBlockValidatorAndProcessorForTesting(v Validator, p Processor) {
 	bc.validator = v
 	bc.processor = p
+}
+
+// `SimulateProfBlock` simulates all the transactions and returns the value accrued to the feeRecipient along with the new header.
+func (bc *BlockChain) SimulateProfBlock(block *types.Block, feeRecipient common.Address, registeredGasLimit uint64, vmConfig vm.Config, useBalanceDiffProfit, excludeWithdrawals bool) (*uint256.Int, *types.Header, error) {
+	// NOTE : PBS part of the block is already validated, so no need to verify header here or check for reorgs. parent exists
+
+	parent := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		return nil, nil, errors.New("parent not found")
+	}
+
+	statedb, err := bc.StateAt(parent.Root)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The chain importer is starting and stopping trie prefetchers. If a bad
+	// block or other error is hit however, an early return may not properly
+	// terminate the background threads. This defer ensures that we clean up
+	// and dangling prefetcher, without defering each and holding on live refs.
+	defer statedb.StopPrefetcher()
+
+	feeRecipientBalanceBefore := new(uint256.Int).Set(statedb.GetBalance(feeRecipient))
+
+	log.Info("FeeRecipient", "Before", feeRecipientBalanceBefore)
+
+	receipts, _, usedGas, err := bc.processor.Process(block, statedb, vmConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// TODO : check for registeredGasLimit hrere
+
+	feeRecipientBalanceDelta := new(uint256.Int).Set(statedb.GetBalance(feeRecipient))
+	log.Info("FeeRecipient", "After", feeRecipientBalanceDelta)
+	feeRecipientBalanceDelta.Sub(feeRecipientBalanceDelta, feeRecipientBalanceBefore)
+	log.Info("FeeRecipient", "Delta", feeRecipientBalanceDelta)
+	if excludeWithdrawals {
+		for _, w := range block.Withdrawals() {
+			if w.Address == feeRecipient {
+				amount := new(uint256.Int).Mul(new(uint256.Int).SetUint64(w.Amount), uint256.NewInt(params.GWei))
+				feeRecipientBalanceDelta.Sub(feeRecipientBalanceDelta, amount)
+			}
+		}
+	}
+	// create the new header
+	header := block.Header()
+	header.GasUsed = usedGas
+	rbloom := types.CreateBloom(receipts)
+	header.Bloom = rbloom
+	header.ReceiptHash = types.DeriveSha(receipts, trie.NewStackTrie(nil))
+	header.Root = statedb.IntermediateRoot(false /* TODO: assuming that EIP158 is disabled. TODO : get from the bc.validator's config which is private currently*/)
+
+	// TODO : handle the case when usebalancediffprofit is false
+
+	return feeRecipientBalanceDelta, header, nil
+
 }
 
 // ValidatePayload validates the payload of the block.

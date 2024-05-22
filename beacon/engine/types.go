@@ -387,6 +387,73 @@ func ExecutionPayloadV2ToBlock(payload *capella.ExecutionPayload) (*types.Block,
 	return ExecutableDataToBlock(executableData, nil, nil)
 }
 
+// ` ExecutionPayloadV3ToProfBlock` assumes that the pbs block is already validated
+func ExecutionPayloadV3ToProfBlock(payload *deneb.ExecutionPayload, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash, profTransactions [][]byte) (*types.Block, error) {
+	// append prof transactions to pbs transactions
+	raw_txs := make([][]byte, len(payload.Transactions)+len(profTransactions))
+	for i, txHexBytes := range payload.Transactions {
+		raw_txs[i] = txHexBytes
+	}
+	for i, txHexBytes := range profTransactions {
+		raw_txs[i+len(payload.Transactions)] = txHexBytes
+	}
+	txs, err := decodeTransactions(raw_txs)
+	if err != nil {
+		return nil, err
+	}
+	// NOTE : checks on extradata, logsbloom, basefeepergas and versionedhashes are not needed as the pbs block is already assumed to be validated
+
+	// TODO : withdrawals are only supported in the pbsBlock, not the prof block currently. similarly blob transactions are not supported in the prof bundle -- this is an easy modification to make
+
+	// construct withdrawals root
+	withdrawals := make([]*types.Withdrawal, len(payload.Withdrawals))
+	for i, withdrawal := range payload.Withdrawals {
+		withdrawals[i] = &types.Withdrawal{
+			Index:     uint64(withdrawal.Index),
+			Validator: uint64(withdrawal.ValidatorIndex),
+			Address:   common.Address(withdrawal.Address),
+			Amount:    uint64(withdrawal.Amount),
+		}
+	}
+	var withdrawalsRoot *common.Hash
+	if withdrawals != nil {
+		h := types.DeriveSha(types.Withdrawals(withdrawals), trie.NewStackTrie(nil))
+		withdrawalsRoot = &h
+	}
+
+	// construct the block
+
+	// first construct the header
+
+	// TODO : gas used ,state root, bloom, and receipts would change after adding prof bundle, do we need them here?
+	header := &types.Header{
+		ParentHash:       common.Hash(payload.ParentHash),
+		UncleHash:        types.EmptyUncleHash,
+		Coinbase:         common.Address(payload.FeeRecipient),
+		Root:             common.Hash(payload.StateRoot),
+		TxHash:           types.DeriveSha(types.Transactions(txs), trie.NewStackTrie(nil)),
+		ReceiptHash:      common.Hash(payload.ReceiptsRoot),
+		Bloom:            types.BytesToBloom(payload.LogsBloom[:]),
+		Difficulty:       common.Big0,
+		Number:           new(big.Int).SetUint64(payload.BlockNumber),
+		GasLimit:         payload.GasLimit,
+		GasUsed:          payload.GasUsed,
+		Time:             payload.Timestamp,
+		BaseFee:          payload.BaseFeePerGas.ToBig(),
+		Extra:            payload.ExtraData,
+		MixDigest:        common.Hash(payload.PrevRandao),
+		WithdrawalsHash:  withdrawalsRoot,
+		ExcessBlobGas:    &payload.ExcessBlobGas,
+		BlobGasUsed:      &payload.BlobGasUsed,
+		ParentBeaconRoot: &parentBeaconBlockRoot,
+	}
+
+	// then construct the block
+	block := types.NewBlockWithHeader(header).WithBody(txs, nil /* uncles */).WithWithdrawals(withdrawals)
+
+	return block, nil
+}
+
 func ExecutionPayloadV3ToBlock(payload *deneb.ExecutionPayload, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash) (*types.Block, error) {
 	txs := make([][]byte, len(payload.Transactions))
 	for i, txHexBytes := range payload.Transactions {

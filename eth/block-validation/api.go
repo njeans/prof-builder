@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/holiman/uint256"
 )
 
 type BlacklistedAddresses []common.Address
@@ -183,6 +184,8 @@ func (r *BuilderBlockValidationRequestV2) UnmarshalJSON(data []byte) error {
 func (api *BlockValidationAPI) ValidateBuilderSubmissionV2(params *BuilderBlockValidationRequestV2) error {
 	// TODO: fuzztest, make sure the validation is sound
 	// TODO: handle context!
+	log.Info("json-rpc validation v2 called!")
+
 	if params.ExecutionPayload == nil {
 		return errors.New("nil execution payload")
 	}
@@ -222,8 +225,63 @@ func (r *BuilderBlockValidationRequestV3) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type ProfSimReq struct {
+	PbsPayload            *builderApiDeneb.ExecutionPayloadAndBlobsBundle
+	ProfBundle            *ProfBundleRequest
+	ParentBeaconBlockRoot common.Hash `json:"parent_beacon_block_root"`
+	RegisteredGasLimit    uint64      `json:"registered_gas_limit,string"`
+	ProposerFeeRecipient  common.Address
+}
+
+type ProfBundleRequest struct {
+	slot         uint64
+	Transactions [][]byte `ssz-max:"1048576,1073741824"`
+	bundleHash   phase0.Hash32
+}
+
+type ProfSimResp struct {
+	Value     *uint256.Int
+	NewHeader *types.Header
+}
+
+func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimResp, error) {
+
+	log.Info("PROF simulation called!")
+	log.Info(params.PbsPayload.String())
+
+	payload := params.PbsPayload.ExecutionPayload
+	blobsBundle := params.PbsPayload.BlobsBundle
+	profTransactions := params.ProfBundle.Transactions
+
+	// assume prof bundle has undergone basic sanity checks -- non empty and the same slot
+
+	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
+
+	block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactions)
+	if err != nil {
+		return nil, err
+	}
+
+	profValidationResp, err := api.validateProfBlock(block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
+
+	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "NewHeader", profValidationResp.NewHeader)
+
+	if err != nil {
+		log.Error("invalid payload", "hash", block.Hash, "number", block.NumberU64(), "parentHash", block.ParentHash, "err", err)
+		return nil, err
+	}
+	// no need to validate blobs bundle for prof block as prof transactions do not support blobs
+	// ret := map[string]interface{}{}
+
+	return profValidationResp, nil
+
+}
+
 func (api *BlockValidationAPI) ValidateBuilderSubmissionV3(params *BuilderBlockValidationRequestV3) error {
 	// TODO: fuzztest, make sure the validation is sound
+
+	log.Info("json-rpc validation v3 called!")
+
 	payload := params.ExecutionPayload
 	blobsBundle := params.BlobsBundle
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
@@ -245,7 +303,32 @@ func (api *BlockValidationAPI) ValidateBuilderSubmissionV3(params *BuilderBlockV
 	return nil
 }
 
+// TODO : invalid profTransactions are not being filtered out currently, change the validateProfBlock method to pluck out the invalid transactions, blockhash would also change in that case
+
+func (api *BlockValidationAPI) validateProfBlock(block *types.Block, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
+	log.Info("validateProfBlock method called!")
+
+	feeRecipient := common.BytesToAddress(proposerFeeRecipient[:])
+
+	var vmconfig vm.Config
+
+	value, header, err := api.eth.BlockChain().SimulateProfBlock(block, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
+
+	if err != nil {
+		return nil, err
+	}
+
+	log.Info("validated prof block", "hash", block.Hash(), "number", block.NumberU64(), "parentHash", block.ParentHash())
+
+	return &ProfSimResp{value, header}, nil
+
+	// return &ProfSimResp{uint256.NewInt(0), phase0.Hash32(block.Hash())}, nil
+
+}
+
 func (api *BlockValidationAPI) validateBlock(block *types.Block, msg *builderApiV1.BidTrace, registeredGasLimit uint64) error {
+	log.Info("validateBlock method called!")
+
 	if msg.ParentHash != phase0.Hash32(block.ParentHash()) {
 		return fmt.Errorf("incorrect ParentHash %s, expected %s", msg.ParentHash.String(), block.ParentHash().String())
 	}
