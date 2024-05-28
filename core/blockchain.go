@@ -2499,7 +2499,7 @@ func (bc *BlockChain) SimulateProfBlock(block *types.Block, feeRecipient common.
 	rbloom := types.CreateBloom(receipts)
 	header.Bloom = rbloom
 	header.ReceiptHash = types.DeriveSha(receipts, trie.NewStackTrie(nil))
-	header.Root = statedb.IntermediateRoot(false /* TODO: assuming that EIP158 is disabled. TODO : get from the bc.validator's config which is private currently*/)
+	header.Root = statedb.IntermediateRoot(true /* TODO: assuming that EIP158 is enabled. TODO : get from the bc.validator's config which is private currently*/)
 
 	// TODO : handle the case when usebalancediffprofit is false
 

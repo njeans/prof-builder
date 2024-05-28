@@ -257,10 +257,15 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
 
-	block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactions)
+	rawTxs, block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactions)
 	if err != nil {
 		return nil, err
 	}
+	log.Info("RAW transactions START", "Len", len(rawTxs))
+	for _, tx := range rawTxs {
+		log.Info(fmt.Sprintf(`"%#x"`, tx))
+	}
+	log.Info("RAW transactions FINISH")
 
 	profValidationResp, err := api.validateProfBlock(block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
 

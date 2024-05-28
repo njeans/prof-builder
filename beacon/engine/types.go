@@ -388,7 +388,7 @@ func ExecutionPayloadV2ToBlock(payload *capella.ExecutionPayload) (*types.Block,
 }
 
 // ` ExecutionPayloadV3ToProfBlock` assumes that the pbs block is already validated
-func ExecutionPayloadV3ToProfBlock(payload *deneb.ExecutionPayload, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash, profTransactions [][]byte) (*types.Block, error) {
+func ExecutionPayloadV3ToProfBlock(payload *deneb.ExecutionPayload, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash, profTransactions [][]byte) ([][]byte, *types.Block, error) {
 	// append prof transactions to pbs transactions
 	raw_txs := make([][]byte, len(payload.Transactions)+len(profTransactions))
 	for i, txHexBytes := range payload.Transactions {
@@ -399,7 +399,7 @@ func ExecutionPayloadV3ToProfBlock(payload *deneb.ExecutionPayload, blobsBundle 
 	}
 	txs, err := decodeTransactions(raw_txs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// NOTE : checks on extradata, logsbloom, basefeepergas and versionedhashes are not needed as the pbs block is already assumed to be validated
 
@@ -451,7 +451,7 @@ func ExecutionPayloadV3ToProfBlock(payload *deneb.ExecutionPayload, blobsBundle 
 	// then construct the block
 	block := types.NewBlockWithHeader(header).WithBody(txs, nil /* uncles */).WithWithdrawals(withdrawals)
 
-	return block, nil
+	return raw_txs, block, nil
 }
 
 func ExecutionPayloadV3ToBlock(payload *deneb.ExecutionPayload, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash) (*types.Block, error) {
