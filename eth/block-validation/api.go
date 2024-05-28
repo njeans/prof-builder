@@ -318,7 +318,7 @@ func (api *BlockValidationAPI) validateProfBlock(block *types.Block, proposerFee
 		return nil, err
 	}
 
-	log.Info("validated prof block", "hash", block.Hash(), "number", block.NumberU64(), "parentHash", block.ParentHash())
+	log.Info("validated prof block", "number", block.NumberU64(), "parentHash", block.ParentHash())
 
 	return &ProfSimResp{value, header}, nil
 
