@@ -1,6 +1,7 @@
 package blockvalidation
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -235,7 +236,7 @@ type ProfSimReq struct {
 
 type ProfBundleRequest struct {
 	slot         uint64
-	Transactions [][]byte `ssz-max:"1048576,1073741824"`
+	Transactions []string
 	bundleHash   phase0.Hash32
 }
 
@@ -252,12 +253,17 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 	payload := params.PbsPayload.ExecutionPayload
 	blobsBundle := params.PbsPayload.BlobsBundle
 	profTransactions := params.ProfBundle.Transactions
+	// convert hex prof transaction to bytes
+	profTransactionBytes := make([][]byte, len(profTransactions))
+	for i, tx := range profTransactions {
+		profTransactionBytes[i], _ = hex.DecodeString(tx[2:]) // remove 0x // ignore error as it is prevalidated
+	}
 
 	// assume prof bundle has undergone basic sanity checks -- non empty and the same slot
 
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
 
-	rawTxs, block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactions)
+	rawTxs, block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactionBytes)
 	if err != nil {
 		return nil, err
 	}
