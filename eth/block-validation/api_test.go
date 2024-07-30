@@ -390,6 +390,10 @@ func TestValidateBuilderSubmissionV3(t *testing.T) {
 		ParentBeaconBlockRoot: common.Hash{42},
 	}
 
+	fmt.Println("Payload", payload)
+	fmt.Println("ParentHash", execData.ParentHash)
+	fmt.Println("FeeRecipient", proposerAddr.String())
+
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "inaccurate payment")
 	blockRequest.Message.Value = uint256.NewInt(132912184722468)
 	require.NoError(t, api.ValidateBuilderSubmissionV3(blockRequest))
