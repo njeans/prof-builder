@@ -12,6 +12,9 @@ import (
 	builderApiCapella "github.com/attestantio/go-builder-client/api/capella"
 	builderApiDeneb "github.com/attestantio/go-builder-client/api/deneb"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
+	"github.com/attestantio/go-eth2-client/spec/bellatrix"
+	"github.com/attestantio/go-eth2-client/spec/capella"
+	"github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
@@ -241,41 +244,44 @@ type ProfBundleRequest struct {
 }
 
 type ProfSimResp struct {
-	Value     *uint256.Int
-	NewHeader *types.Header
+	Value            *uint256.Int
+	ExecutionPayload *builderApiDeneb.ExecutionPayloadAndBlobsBundle
 }
 
 func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimResp, error) {
-
+	var err error
 	log.Info("PROF simulation called!")
 	log.Info(params.PbsPayload.String())
 
 	payload := params.PbsPayload.ExecutionPayload
 	blobsBundle := params.PbsPayload.BlobsBundle
-	profTransactions := params.ProfBundle.Transactions
+	profTransactionString := params.ProfBundle.Transactions
 	// convert hex prof transaction to bytes
-	profTransactionBytes := make([][]byte, len(profTransactions))
-	for i, tx := range profTransactions {
+	profTransactionBytes := make([][]byte, len(profTransactionString))
+	for i, tx := range profTransactionString {
 		profTransactionBytes[i], _ = hex.DecodeString(tx[2:]) // remove 0x // ignore error as it is prevalidated
 	}
 
+	profTransactions := make([]*types.Transaction, len(profTransactionString))
+	for i, encTx := range profTransactionBytes {
+		var tx types.Transaction
+		if err := tx.UnmarshalBinary(encTx); err != nil {
+			return nil, fmt.Errorf("invalid transaction %d: %v", i, err)
+		}
+		profTransactions[i] = &tx
+	}
 	// assume prof bundle has undergone basic sanity checks -- non empty and the same slot
 
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
 
-	rawTxs, block, err := engine.ExecutionPayloadV3ToProfBlock(payload, blobsBundle, params.ParentBeaconBlockRoot, profTransactionBytes)
+	block, err := engine.ExecutionPayloadV3ToBlock(payload, blobsBundle, params.ParentBeaconBlockRoot)
 	if err != nil {
 		return nil, err
 	}
-	log.Info("RAW transactions START", "Len", len(rawTxs))
-	for _, tx := range rawTxs {
-		log.Info(fmt.Sprintf(`"%#x"`, tx))
-	}
-	log.Info("RAW transactions FINISH")
 
-	profValidationResp, err := api.validateProfBlock(block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
+	profValidationResp, err := api.validateProfBlock(block, profTransactions, params.ProposerFeeRecipient, params.RegisteredGasLimit)
 
-	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "NewHeader", profValidationResp.NewHeader)
+	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "ExecutionPayload", profValidationResp.ExecutionPayload)
 
 	if err != nil {
 		log.Error("invalid payload", "hash", block.Hash, "number", block.NumberU64(), "parentHash", block.ParentHash, "err", err)
@@ -316,22 +322,37 @@ func (api *BlockValidationAPI) ValidateBuilderSubmissionV3(params *BuilderBlockV
 
 // TODO : invalid profTransactions are not being filtered out currently, change the validateProfBlock method to pluck out the invalid transactions, blockhash would also change in that case
 
-func (api *BlockValidationAPI) validateProfBlock(block *types.Block, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
+func (api *BlockValidationAPI) validateProfBlock(block *types.Block, profTxs []*types.Transaction, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
 	log.Info("validateProfBlock method called!")
+
+	allTxs := make([]*types.Transaction, block.Transactions().Len())
+	copy(allTxs, block.Transactions())
+	allTxs = append(allTxs, profTxs...)
+
+	profBlock := block.WithBody(allTxs, block.Uncles())
 
 	feeRecipient := common.BytesToAddress(proposerFeeRecipient[:])
 
 	var vmconfig vm.Config
 
-	value, header, err := api.eth.BlockChain().SimulateProfBlock(block, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
+	value, _, err := api.eth.BlockChain().SimulateProfBlock(profBlock, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
 
 	if err != nil {
 		return nil, err
 	}
-
 	log.Info("validated prof block", "number", block.NumberU64(), "parentHash", block.ParentHash())
 
-	return &ProfSimResp{value, header}, nil
+	valueBig := value.ToBig()
+
+	executableData := engine.BlockToExecutableData(profBlock, valueBig, []*types.BlobTxSidecar{})
+
+	payload, err := getDenebPayload(executableData)
+	if err != nil {
+		log.Error("could not format execution payload", "err", err)
+		return nil, err
+	}
+
+	return &ProfSimResp{value, payload}, nil
 
 	// return &ProfSimResp{uint256.NewInt(0), phase0.Hash32(block.Hash())}, nil
 
@@ -418,4 +439,77 @@ func validateBlobsBundle(txs types.Transactions, blobsBundle *builderApiDeneb.Bl
 	}
 	log.Info("validated blobs bundle", "blobs", len(blobs), "commits", len(commits), "proofs", len(proofs))
 	return nil
+}
+
+func getDenebPayload(
+	data *engine.ExecutionPayloadEnvelope,
+) (*builderApiDeneb.ExecutionPayloadAndBlobsBundle, error) {
+	payload := data.ExecutionPayload
+	blobsBundle := data.BlobsBundle
+	baseFeePerGas, overflow := uint256.FromBig(payload.BaseFeePerGas)
+	if overflow {
+		return nil, fmt.Errorf("base fee per gas overflow")
+	}
+	transactions := make([]bellatrix.Transaction, len(payload.Transactions))
+	for i, tx := range payload.Transactions {
+		transactions[i] = bellatrix.Transaction(tx)
+	}
+	withdrawals := make([]*capella.Withdrawal, len(payload.Withdrawals))
+	for i, wd := range payload.Withdrawals {
+		withdrawals[i] = &capella.Withdrawal{
+			Index:          capella.WithdrawalIndex(wd.Index),
+			ValidatorIndex: phase0.ValidatorIndex(wd.Validator),
+			Address:        bellatrix.ExecutionAddress(wd.Address),
+			Amount:         phase0.Gwei(wd.Amount),
+		}
+	}
+	return &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
+		ExecutionPayload: &deneb.ExecutionPayload{
+			ParentHash:    [32]byte(payload.ParentHash),
+			FeeRecipient:  [20]byte(payload.FeeRecipient),
+			StateRoot:     [32]byte(payload.StateRoot),
+			ReceiptsRoot:  [32]byte(payload.ReceiptsRoot),
+			LogsBloom:     types.BytesToBloom(payload.LogsBloom),
+			PrevRandao:    [32]byte(payload.Random),
+			BlockNumber:   payload.Number,
+			GasLimit:      payload.GasLimit,
+			GasUsed:       payload.GasUsed,
+			Timestamp:     payload.Timestamp,
+			ExtraData:     payload.ExtraData,
+			BaseFeePerGas: baseFeePerGas,
+			BlockHash:     [32]byte(payload.BlockHash),
+			Transactions:  transactions,
+			Withdrawals:   withdrawals,
+			BlobGasUsed:   *payload.BlobGasUsed,
+			ExcessBlobGas: *payload.ExcessBlobGas,
+		},
+		BlobsBundle: getBlobsBundle(blobsBundle),
+	}, nil
+
+}
+
+func getBlobsBundle(blobsBundle *engine.BlobsBundleV1) *builderApiDeneb.BlobsBundle {
+	commitments := make([]deneb.KZGCommitment, len(blobsBundle.Commitments))
+	proofs := make([]deneb.KZGProof, len(blobsBundle.Proofs))
+	blobs := make([]deneb.Blob, len(blobsBundle.Blobs))
+
+	// we assume the lengths for blobs bundle is validated beforehand to be the same
+	for i := range blobsBundle.Blobs {
+		var commitment deneb.KZGCommitment
+		copy(commitment[:], blobsBundle.Commitments[i][:])
+		commitments[i] = commitment
+
+		var proof deneb.KZGProof
+		copy(proof[:], blobsBundle.Proofs[i][:])
+		proofs[i] = proof
+
+		var blob deneb.Blob
+		copy(blob[:], blobsBundle.Blobs[i][:])
+		blobs[i] = blob
+	}
+	return &builderApiDeneb.BlobsBundle{
+		Commitments: commitments,
+		Proofs:      proofs,
+		Blobs:       blobs,
+	}
 }
