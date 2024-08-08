@@ -262,33 +262,30 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 		profTransactionBytes[i], _ = hex.DecodeString(tx[2:]) // remove 0x // ignore error as it is prevalidated
 	}
 
-	profTransactions := make([]*types.Transaction, len(profTransactionString))
-	for i, encTx := range profTransactionBytes {
-		var tx types.Transaction
-		if err := tx.UnmarshalBinary(encTx); err != nil {
-			return nil, fmt.Errorf("invalid transaction %d: %v", i, err)
-		}
-		profTransactions[i] = &tx
-	}
-	// assume prof bundle has undergone basic sanity checks -- non empty and the same slot
-
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
 
-	block, err := engine.ExecutionPayloadV3ToBlock(payload, blobsBundle, params.ParentBeaconBlockRoot)
+	block, err := engine.ExecutionPayloadV3ToBlockProf(payload, profTransactionBytes, blobsBundle, params.ParentBeaconBlockRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	profValidationResp, err := api.validateProfBlock(block, profTransactions, params.ProposerFeeRecipient, params.RegisteredGasLimit)
-
-	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "ExecutionPayload", profValidationResp.ExecutionPayload)
-
+	profValidationResp, err := api.validateProfBlock(block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
 	if err != nil {
 		log.Error("invalid payload", "hash", block.Hash, "number", block.NumberU64(), "parentHash", block.ParentHash, "err", err)
 		return nil, err
 	}
-	// no need to validate blobs bundle for prof block as prof transactions do not support blobs
-	// ret := map[string]interface{}{}
+
+	//TODO: this final check shouldn't be needed
+	profBlock, err := engine.ExecutionPayloadV3ToBlock(profValidationResp.ExecutionPayload.ExecutionPayload, profValidationResp.ExecutionPayload.BlobsBundle, params.ParentBeaconBlockRoot)
+	if err != nil {
+		log.Error("invalid profBlock", "err", err)
+		return nil, err
+	}
+
+	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "ExecutionPayload", profValidationResp.ExecutionPayload, "blockhash", profBlock.Hash().String(), "transactionroot", profBlock.TxHash().String())
+
+	// // no need to validate blobs bundle for prof block as prof transactions do not support blobs
+	// // ret := map[string]interface{}{}
 
 	return profValidationResp, nil
 
@@ -322,29 +319,24 @@ func (api *BlockValidationAPI) ValidateBuilderSubmissionV3(params *BuilderBlockV
 
 // TODO : invalid profTransactions are not being filtered out currently, change the validateProfBlock method to pluck out the invalid transactions, blockhash would also change in that case
 
-func (api *BlockValidationAPI) validateProfBlock(block *types.Block, profTxs []*types.Transaction, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
+func (api *BlockValidationAPI) validateProfBlock(profBlock *types.Block, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
 	log.Info("validateProfBlock method called!")
-
-	allTxs := make([]*types.Transaction, block.Transactions().Len())
-	copy(allTxs, block.Transactions())
-	allTxs = append(allTxs, profTxs...)
-
-	profBlock := block.WithBody(allTxs, block.Uncles())
 
 	feeRecipient := common.BytesToAddress(proposerFeeRecipient[:])
 
 	var vmconfig vm.Config
 
-	value, _, err := api.eth.BlockChain().SimulateProfBlock(profBlock, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
+	value, header, err := api.eth.BlockChain().SimulateProfBlock(profBlock, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
 
 	if err != nil {
 		return nil, err
 	}
-	log.Info("validated prof block", "number", block.NumberU64(), "parentHash", block.ParentHash())
+	profBlockFinal := profBlock.WithSeal(header)
+	log.Info("validated prof block", "number", profBlockFinal.NumberU64(), "parentHash", profBlockFinal.ParentHash())
 
 	valueBig := value.ToBig()
 
-	executableData := engine.BlockToExecutableData(profBlock, valueBig, []*types.BlobTxSidecar{})
+	executableData := engine.BlockToExecutableData(profBlockFinal, valueBig, []*types.BlobTxSidecar{})
 
 	payload, err := getDenebPayload(executableData)
 	if err != nil {

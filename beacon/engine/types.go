@@ -277,7 +277,7 @@ func ExecutableDataToBlock(params ExecutableData, versionedHashes []common.Hash,
 //		difficulty = 0
 //	 	if versionedHashes != nil, versionedHashes match to blob transactions
 //
-// It *does not check* that the blockhash of the constructed block matches the parameters. Nil
+// Does NOT! that the blockhash of the constructed block matches the parameters. Nil
 // Withdrawals value will propagate through the returned block. Empty
 // Withdrawals value must be passed via non-nil, length 0 value in params.
 func ExecutableDataToBlockNoCheck(params ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash) (*types.Block, error) {
@@ -337,9 +337,8 @@ func ExecutableDataToBlockNoCheck(params ExecutableData, versionedHashes []commo
 		ParentBeaconRoot: beaconRoot,
 	}
 	block := types.NewBlockWithHeader(header).WithBody(txs, nil /* uncles */).WithWithdrawals(params.Withdrawals)
-	// if block.Hash() != params.BlockHash {
-	// 	return nil, fmt.Errorf("blockhash mismatch, want %x, got %x", params.BlockHash, block.Hash())
-	// }
+	// fmt.Printf("ExecutableDataToBlockNoCheck original %x, new %x\n", params.BlockHash, block.Hash())
+
 	return block, nil
 }
 
@@ -505,6 +504,56 @@ func ExecutionPayloadV3ToBlock(payload *deneb.ExecutionPayload, blobsBundle *den
 		ExcessBlobGas: &payload.ExcessBlobGas,
 	}
 	return ExecutableDataToBlock(executableData, versionedHashes, &parentBeaconBlockRoot)
+}
+
+func ExecutionPayloadV3ToBlockProf(payload *deneb.ExecutionPayload, profTxs [][]byte, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash) (*types.Block, error) {
+	fmt.Println("builder called ExecutionPayloadV3ToBlock")
+	txs := make([][]byte, len(payload.Transactions)+len(profTxs))
+	for i, txHexBytes := range payload.Transactions {
+		txs[i] = txHexBytes
+	}
+	for i, txHexBytes := range profTxs {
+		txs[i+len(payload.Transactions)] = txHexBytes
+	}
+
+	withdrawals := make([]*types.Withdrawal, len(payload.Withdrawals))
+	for i, withdrawal := range payload.Withdrawals {
+		withdrawals[i] = &types.Withdrawal{
+			Index:     uint64(withdrawal.Index),
+			Validator: uint64(withdrawal.ValidatorIndex),
+			Address:   common.Address(withdrawal.Address),
+			Amount:    uint64(withdrawal.Amount),
+		}
+	}
+
+	hasher := sha256.New()
+	versionedHashes := make([]common.Hash, len(blobsBundle.Commitments))
+	for i, commitment := range blobsBundle.Commitments {
+		c := kzg4844.Commitment(commitment)
+		computed := kzg4844.CalcBlobHashV1(hasher, &c)
+		versionedHashes[i] = common.Hash(computed)
+	}
+
+	executableData := ExecutableData{
+		ParentHash:    common.Hash(payload.ParentHash),
+		FeeRecipient:  common.Address(payload.FeeRecipient),
+		StateRoot:     common.Hash(payload.StateRoot),
+		ReceiptsRoot:  common.Hash(payload.ReceiptsRoot),
+		LogsBloom:     payload.LogsBloom[:],
+		Random:        common.Hash(payload.PrevRandao),
+		Number:        payload.BlockNumber,
+		GasLimit:      payload.GasLimit,
+		GasUsed:       payload.GasUsed,
+		Timestamp:     payload.Timestamp,
+		ExtraData:     payload.ExtraData,
+		BaseFeePerGas: payload.BaseFeePerGas.ToBig(),
+		BlockHash:     common.Hash(payload.BlockHash),
+		Transactions:  txs,
+		Withdrawals:   withdrawals,
+		BlobGasUsed:   &payload.BlobGasUsed,
+		ExcessBlobGas: &payload.ExcessBlobGas,
+	}
+	return ExecutableDataToBlockNoCheck(executableData, versionedHashes, &parentBeaconBlockRoot)
 }
 
 // Client identifiers to support ClientVersionV1.
