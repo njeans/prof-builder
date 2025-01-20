@@ -283,7 +283,6 @@ func prepareContractCallTx(ethservice *eth.Ethereum, contract tConctract, signer
 	if err != nil {
 		panic(err)
 	}
-	// nonce := ethservice.TxPool().Nonce(signer) + nonceMod //signer.getNonceMod(ethservice.BlockChain().CurrentHeader().Number)
 	baseFee := new(big.Int).Mul(big.NewInt(2), ethservice.BlockChain().CurrentHeader().BaseFee)
 
 	tx, err := types.SignTx(types.NewTransaction(nonce, contract.address, new(big.Int), 9000000, baseFee, callData), types.HomesteadSigner{}, signerKey)
@@ -308,6 +307,9 @@ type BechmarkEnvironment struct {
 }
 
 func NewBenchmarkEnvironment(numTokenPairs int, numUsers int, numSearcher int) (*BechmarkEnvironment, error) {
+	if numTokenPairs != 1 {
+		panic(fmt.Errorf("Multiple token pairs not impelented"))
+	}
 	var err error
 	rand.New(rand.NewSource(10))
 	deployerKey, err := crypto.ToECDSA(hexutil.MustDecode("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"))
@@ -381,7 +383,7 @@ func NewBenchmarkEnvironment(numTokenPairs int, numUsers int, numSearcher int) (
 			mintTx := prepareContractCallTx(ethservice, daiContract, deployerKey, deployerNonce, "mint", spender.address, startBalanceB)
 			deployerNonce += 1
 			approveTxs = append(approveTxs, mintTx)
-			spenderNonce := ethservice.TxPool().Nonce(spender.address) //+ spender.getNonceMod(ethservice.BlockChain().CurrentHeader().Number)
+			spenderNonce := ethservice.TxPool().Nonce(spender.address)
 			depositTx, err := types.SignTx(types.NewTransaction(spenderNonce, wethContract.address, startBalanceA, 9000000, getBaseFee(), hexutil.MustDecode("0xd0e30db0")), types.HomesteadSigner{}, spender.key)
 			if err != nil {
 				panic(err)
@@ -556,7 +558,6 @@ func TestBenchmarkEnvironment(t *testing.T) {
 	doSwap(environ1, new(big.Int).Mul(bigEther, big.NewInt(70)), 1, 0, amtOut1)
 	environ1.resetNonceMod()
 
-	// amtOut2, _ := big.NewInt(0).SetString("-1174653512533388870726", 10)
 	amtOut2, _ := big.NewInt(0).SetString("-1032665152610525182449", 10)
 	doSwap(environ1, new(big.Int).Mul(bigEther, big.NewInt(1)), 0, 0, amtOut2)
 	environ1.resetNonceMod()
@@ -564,10 +565,10 @@ func TestBenchmarkEnvironment(t *testing.T) {
 	// environ2, err := NewBenchmarkEnvironment(2, 5, 5)
 	// require.NoError(t, err)
 
-	// // amtOut0, _ := big.NewInt(0).SetString("-61727865885602705148354", 10)
+	// amtOut0, _ := big.NewInt(0).SetString("-61727865885602705148354", 10)
 	// doSwap(environ2, new(big.Int).Mul(bigEther, big.NewInt(50)), 0, 0, amtOut0)
 
-	// // amtOut1, _ := big.NewInt(0).SetString("-77174302538729393196667", 10)
+	// amtOut1, _ := big.NewInt(0).SetString("-77174302538729393196667", 10)
 	// doSwap(environ1, new(big.Int).Mul(bigEther, big.NewInt(70)), 1, 1, amtOut0)
 
 	// amtOut3, _ := big.NewInt(0).SetString("-1174653512533388870726", 10)
@@ -618,49 +619,47 @@ func TestBenchmarkProf(t *testing.T) {
 
 func BenchmarkAppendProfBundle(b *testing.B) {
 	numUsers := 100
+	numBlockTxs := 30
+	numProfTxs := 10
 	environ1, err := NewBenchmarkEnvironment(1, numUsers, 0)
 	if err != nil {
 		panic(err)
 	}
 	api := NewBlockValidationAPI(environ1.ethservice, nil, true, false)
-	numBlockTxs := 10
-	numProfTxs := 2
 
-	for j := 0; j < 10; j++ {
-		blockTxs := make([]*types.Transaction, numBlockTxs)
-		for i := 0; i < numBlockTxs; i++ {
-			blockTxs[i] = environ1.randomSwap()
-		}
+	blockTxs := make([]*types.Transaction, numBlockTxs)
+	for i := 0; i < numBlockTxs; i++ {
+		blockTxs[i] = environ1.randomSwap()
+	}
 
-		profTxs := make([]string, numProfTxs)
-		for i := 0; i < numProfTxs; i++ {
-			tx := environ1.randomSwap()
-			txBytes, err := tx.MarshalBinary()
-			if err != nil {
-				panic(err)
-			}
-			profTxs[i] = fmt.Sprintf("0x%x", txBytes)
-		}
-		blockRequest, err := environ1.setupBuilderSubmission(api, blockTxs)
+	profTxs := make([]string, numProfTxs)
+	for i := 0; i < numProfTxs; i++ {
+		tx := environ1.randomSwap()
+		txBytes, err := tx.MarshalBinary()
 		if err != nil {
 			panic(err)
 		}
-		profRequest := &ProfSimReq{
-			PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
-				ExecutionPayload: blockRequest.ExecutionPayload,
-				BlobsBundle:      blockRequest.BlobsBundle,
-			},
-			ProfBundle: &ProfBundleRequest{
-				Transactions: profTxs,
-			},
-			ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
-			RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
-			ProposerFeeRecipient:  testValidatorAddr,
-		}
-		for i := 0; i < b.N; i++ {
-			_, _ = api.AppendProfBundle(profRequest)
-		}
-		environ1.resetNonceMod()
+		profTxs[i] = fmt.Sprintf("0x%x", txBytes)
 	}
+	blockRequest, err := environ1.setupBuilderSubmission(api, blockTxs)
+	if err != nil {
+		panic(err)
+	}
+	profRequest := &ProfSimReq{
+		PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
+			ExecutionPayload: blockRequest.ExecutionPayload,
+			BlobsBundle:      blockRequest.BlobsBundle,
+		},
+		ProfBundle: &ProfBundleRequest{
+			Transactions: profTxs,
+		},
+		ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
+		RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
+		ProposerFeeRecipient:  testValidatorAddr,
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = api.AppendProfBundle(profRequest)
+	}
+	// environ1.resetNonceMod()
 
 }
