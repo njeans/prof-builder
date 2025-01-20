@@ -2451,17 +2451,12 @@ func (bc *BlockChain) SetBlockValidatorAndProcessorForTesting(v Validator, p Pro
 }
 
 // `SimulateProfBlock` simulates all the transactions and returns the value accrued to the feeRecipient along with the new header.
-func (bc *BlockChain) SimulateProfBlock(block *types.Block, feeRecipient common.Address, registeredGasLimit uint64, vmConfig vm.Config, useBalanceDiffProfit, excludeWithdrawals bool) (*uint256.Int, *types.Header, error) {
+func (bc *BlockChain) SimulateProfBlock(block *types.Block, feeRecipient common.Address, registeredGasLimit uint64, vmConfig vm.Config, useBalanceDiffProfit, excludeWithdrawals bool, profProcessor *ProfProcessor, startReceipts *types.Receipts, statedb *state.StateDB) (*uint256.Int, *types.Header, error) {
 	// NOTE : PBS part of the block is already validated, so no need to verify header here or check for reorgs. parent exists
 
 	parent := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
 	if parent == nil {
 		return nil, nil, errors.New("parent not found")
-	}
-
-	statedb, err := bc.StateAt(parent.Root)
-	if err != nil {
-		return nil, nil, err
 	}
 
 	// The chain importer is starting and stopping trie prefetchers. If a bad
@@ -2474,7 +2469,7 @@ func (bc *BlockChain) SimulateProfBlock(block *types.Block, feeRecipient common.
 
 	log.Info("FeeRecipient", "Before", feeRecipientBalanceBefore)
 
-	receipts, _, usedGas, err := bc.processor.Process(block, statedb, vmConfig)
+	receipts, _, usedGas, err := profProcessor.ProcessProf(block, statedb, vmConfig, startReceipts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2649,6 +2644,150 @@ func (bc *BlockChain) ValidatePayload(block *types.Block, feeRecipient common.Ad
 	}
 
 	return nil
+}
+
+// ValidatePayload validates the payload of the block.
+// It returns nil if the payload is valid, otherwise it returns an error.
+//   - `useBalanceDiffProfit` if set to false, proposer payment is assumed to be in the last transaction of the block
+//     otherwise we use proposer balance changes after the block to calculate proposer payment (see details in the code)
+//   - `excludeWithdrawals` if set to true, withdrawals to the fee recipient are excluded from the balance change
+func (bc *BlockChain) ValidatePayloadProf(block *types.Block, feeRecipient common.Address, expectedProfit *big.Int, registeredGasLimit uint64, vmConfig vm.Config, useBalanceDiffProfit, excludeWithdrawals bool) (error, *types.Receipts, *state.StateDB) {
+	fmt.Println("ValidatePayloadProf")
+	header := block.Header()
+	if err := bc.engine.VerifyHeader(bc, header); err != nil {
+		return err, nil, nil
+	}
+
+	current := bc.CurrentBlock()
+	reorg, err := bc.forker.ReorgNeeded(current, header)
+	if err == nil && reorg {
+		return errors.New("block requires a reorg"), nil, nil
+	}
+
+	parent := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		return errors.New("parent not found"), nil, nil
+	}
+
+	calculatedGasLimit := CalcGasLimit(parent.GasLimit, registeredGasLimit)
+	if calculatedGasLimit != header.GasLimit {
+		return errors.New("incorrect gas limit set"), nil, nil
+	}
+
+	statedb, err := bc.StateAt(parent.Root)
+	if err != nil {
+		return err, nil, nil
+	}
+
+	// The chain importer is starting and stopping trie prefetchers. If a bad
+	// block or other error is hit however, an early return may not properly
+	// terminate the background threads. This defer ensures that we clean up
+	// and dangling prefetcher, without defering each and holding on live refs.
+	defer statedb.StopPrefetcher()
+
+	feeRecipientBalanceBefore := new(uint256.Int).Set(statedb.GetBalance(feeRecipient))
+
+	receipts, _, usedGas, err := bc.processor.Process(block, statedb, vmConfig)
+	if err != nil {
+		return err, nil, nil
+	}
+
+	feeRecipientBalanceDelta := new(uint256.Int).Set(statedb.GetBalance(feeRecipient))
+	feeRecipientBalanceDelta.Sub(feeRecipientBalanceDelta, feeRecipientBalanceBefore)
+	if excludeWithdrawals {
+		for _, w := range block.Withdrawals() {
+			if w.Address == feeRecipient {
+				amount := new(uint256.Int).Mul(new(uint256.Int).SetUint64(w.Amount), uint256.NewInt(params.GWei))
+				feeRecipientBalanceDelta.Sub(feeRecipientBalanceDelta, amount)
+			}
+		}
+	}
+
+	if bc.Config().IsShanghai(header.Number, header.Time) {
+		if header.WithdrawalsHash == nil {
+			return fmt.Errorf("withdrawals hash is missing"), nil, nil
+		}
+		// withdrawals hash and withdrawals validated later in ValidateBody
+	} else {
+		if header.WithdrawalsHash != nil {
+			return fmt.Errorf("withdrawals hash present before shanghai"), nil, nil
+		}
+		if block.Withdrawals() != nil {
+			return fmt.Errorf("withdrawals list present in block body before shanghai"), nil, nil
+		}
+	}
+
+	if err := bc.validator.ValidateBody(block); err != nil {
+		return err, nil, nil
+	}
+
+	if err := bc.validator.ValidateState(block, statedb, receipts, usedGas); err != nil {
+		return err, nil, nil
+	}
+
+	dbcopy := statedb.Copy()
+	// fmt.Printf("ValidatePayloadProf receipts %v statedb %v\n", receipts, dbcopy)
+
+	// Validate proposer payment
+
+	if useBalanceDiffProfit {
+		uint256ExpectedProfit, ok := uint256.FromBig(expectedProfit)
+		if !ok {
+			if feeRecipientBalanceDelta.Cmp(uint256ExpectedProfit) >= 0 {
+				if feeRecipientBalanceDelta.Cmp(uint256ExpectedProfit) > 0 {
+					log.Warn("builder claimed profit is lower than calculated profit", "expected", expectedProfit, "actual", feeRecipientBalanceDelta)
+				}
+				// fmt.Printf("builder profit not changed %v actual %v cmp %v\n", expectedProfit, feeRecipientBalanceDelta, feeRecipientBalanceDelta.Cmp(uint256ExpectedProfit))
+				return nil, &receipts, dbcopy
+			}
+			log.Warn("proposer payment not enough, trying last tx payment validation", "expected", expectedProfit, "actual", feeRecipientBalanceDelta)
+		}
+
+		if len(receipts) == 0 {
+			return errors.New("no proposer payment receipt"), nil, nil
+		}
+
+		lastReceipt := receipts[len(receipts)-1]
+		if lastReceipt.Status != types.ReceiptStatusSuccessful {
+			return errors.New("proposer payment not successful"), nil, nil
+		}
+		txIndex := lastReceipt.TransactionIndex
+		if txIndex+1 != uint(len(block.Transactions())) {
+			return fmt.Errorf("proposer payment index not last transaction in the block (%d of %d)", txIndex, len(block.Transactions())-1), nil, nil
+		}
+
+		paymentTx := block.Transaction(lastReceipt.TxHash)
+		if paymentTx == nil {
+			return errors.New("payment tx not in the block"), nil, nil
+		}
+
+		paymentTo := paymentTx.To()
+		if paymentTo == nil || *paymentTo != feeRecipient {
+			return fmt.Errorf("payment tx not to the proposers fee recipient (%v)", paymentTo), nil, nil
+		}
+
+		if paymentTx.Value().Cmp(expectedProfit) != 0 {
+			return fmt.Errorf("inaccurate payment %s, expected %s", paymentTx.Value().String(), expectedProfit.String()), nil, nil
+		}
+
+		if len(paymentTx.Data()) != 0 {
+			return fmt.Errorf("malformed proposer payment, contains calldata"), nil, nil
+		}
+
+		if paymentTx.GasPrice().Cmp(block.BaseFee()) != 0 {
+			return fmt.Errorf("malformed proposer payment, gas price not equal to base fee"), nil, nil
+		}
+
+		if paymentTx.GasTipCap().Cmp(block.BaseFee()) != 0 && paymentTx.GasTipCap().Sign() != 0 {
+			return fmt.Errorf("malformed proposer payment, unexpected gas tip cap"), nil, nil
+		}
+
+		if paymentTx.GasFeeCap().Cmp(block.BaseFee()) != 0 {
+			return fmt.Errorf("malformed proposer payment, unexpected gas fee cap"), nil, nil
+		}
+	}
+
+	return nil, &receipts, dbcopy
 }
 
 // SetTrieFlushInterval configures how often in-memory tries are persisted to disk.

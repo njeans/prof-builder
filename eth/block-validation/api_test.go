@@ -325,7 +325,6 @@ func TestValidateBuilderSubmissionV3(t *testing.T) {
 
 	statedb, _ := ethservice.BlockChain().StateAt(parent.Root)
 	nonce := statedb.GetNonce(testAddr)
-
 	tx1, _ := types.SignTx(types.NewTransaction(nonce, common.Address{0x16}, big.NewInt(10), 21000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
 	ethservice.TxPool().Add([]*types.Transaction{tx1}, true, true, false)
 
@@ -446,6 +445,116 @@ func TestValidateBuilderSubmissionV3(t *testing.T) {
 	blockRequest.ExecutionPayload = invalidPayload
 	updatePayloadHashV3(t, blockRequest)
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "could not apply tx 4", "insufficient funds for gas * price + value")
+}
+
+func TestValidateBuilderSubmissionV3Prof(t *testing.T) {
+	genesis, blocks := generateMergeChain(10, true)
+
+	// Set cancun time to last block + 5 seconds
+	time := blocks[len(blocks)-1].Time() + 5
+	genesis.Config.ShanghaiTime = &time
+	genesis.Config.CancunTime = &time
+	os.Setenv("BUILDER_TX_SIGNING_KEY", testBuilderKeyHex)
+
+	n, ethservice := startEthService(t, genesis, blocks)
+	ethservice.Merger().ReachTTD()
+	defer n.Close()
+
+	api := NewBlockValidationAPI(ethservice, nil, true, false)
+	parent := ethservice.BlockChain().CurrentHeader()
+
+	api.eth.APIBackend.Miner().SetEtherbase(testBuilderAddr)
+
+	statedb, _ := ethservice.BlockChain().StateAt(parent.Root)
+	nonce := statedb.GetNonce(testAddr)
+
+	tx1, _ := types.SignTx(types.NewTransaction(nonce, common.Address{0x16}, big.NewInt(10), 21000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
+	ethservice.TxPool().Add([]*types.Transaction{tx1}, true, true, false)
+
+	cc, _ := types.SignTx(types.NewContractCreation(nonce+1, new(big.Int), 1000000, big.NewInt(2*params.InitialBaseFee), logCode), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
+	ethservice.TxPool().Add([]*types.Transaction{cc}, true, true, false)
+
+	baseFee := eip1559.CalcBaseFee(params.AllEthashProtocolChanges, parent)
+	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, baseFee, nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
+	ethservice.TxPool().Add([]*types.Transaction{tx2}, true, true, false)
+
+	withdrawals := []*types.Withdrawal{
+		{
+			Index:     0,
+			Validator: 1,
+			Amount:    100,
+			Address:   testAddr,
+		},
+		{
+			Index:     1,
+			Validator: 1,
+			Amount:    100,
+			Address:   testAddr,
+		},
+	}
+
+	execData, err := assembleBlock(api, parent.Hash(), &engine.PayloadAttributes{
+		Timestamp:             parent.Time + 5,
+		Withdrawals:           withdrawals,
+		SuggestedFeeRecipient: testValidatorAddr,
+		BeaconRoot:            &common.Hash{42},
+	})
+
+	require.NoError(t, err)
+	require.EqualValues(t, len(execData.Withdrawals), 2)
+	require.EqualValues(t, len(execData.Transactions), 4)
+
+	payload, err := ExecutableDataToExecutionPayloadV3(execData)
+	require.NoError(t, err)
+
+	proposerAddr := bellatrix.ExecutionAddress{}
+	copy(proposerAddr[:], testValidatorAddr.Bytes())
+
+	blockRequest := &BuilderBlockValidationRequestV3{
+		SubmitBlockRequest: builderApiDeneb.SubmitBlockRequest{
+			Signature: phase0.BLSSignature{},
+			Message: &builderApiV1.BidTrace{
+				ParentHash:           phase0.Hash32(execData.ParentHash),
+				BlockHash:            phase0.Hash32(execData.BlockHash),
+				ProposerFeeRecipient: proposerAddr,
+				GasLimit:             execData.GasLimit,
+				GasUsed:              execData.GasUsed,
+				// This value is actual profit + 1, validation should fail
+				Value: uint256.NewInt(132912184722468),
+			},
+			ExecutionPayload: payload,
+			BlobsBundle: &builderApiDeneb.BlobsBundle{
+				Commitments: make([]deneb.KZGCommitment, 0),
+				Proofs:      make([]deneb.KZGProof, 0),
+				Blobs:       make([]deneb.Blob, 0),
+			},
+		},
+		RegisteredGasLimit:    execData.GasLimit,
+		ParentBeaconBlockRoot: common.Hash{42},
+	}
+
+	fmt.Println("Payload", payload)
+	fmt.Println("ParentHash", execData.ParentHash)
+	fmt.Println("FeeRecipient", proposerAddr.String())
+
+	require.NoError(t, api.ValidateBuilderSubmissionV3(blockRequest))
+
+	tx4Str := "0xf8660d840de56ab3825208948d71c4fdf2e38128e98c44ed2265c54b87e381030a808360306ba0fb566d9a9b2566b35791d3fed084ee2bcf5045c290f5749c8a340c18f5267ea4a07c9f349c8778ee0dab6304acb9a68be7fc8c65c65507f82ac961b55f72d39f5e"
+
+	profRequest := &ProfSimReq{
+		PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
+			ExecutionPayload: blockRequest.ExecutionPayload,
+			BlobsBundle:      blockRequest.BlobsBundle,
+		},
+		ProfBundle: &ProfBundleRequest{
+			Transactions: []string{tx4Str},
+		},
+		ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
+		RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
+		ProposerFeeRecipient:  testValidatorAddr,
+	}
+	_, err = api.AppendProfBundle(profRequest)
+	require.NoError(t, err)
 }
 
 func updatePayloadHash(t *testing.T, blockRequest *BuilderBlockValidationRequest) {

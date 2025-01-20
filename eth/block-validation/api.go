@@ -18,6 +18,8 @@ import (
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
@@ -129,16 +131,26 @@ type BlockValidationAPI struct {
 	useBalanceDiffProfit bool
 	// If set to true, withdrawals to the fee recipient are excluded from the balance delta.
 	excludeWithdrawals bool
+	profProcessor      *core.ProfProcessor
+	profCache          map[common.Hash]blockValidationCache
+}
+
+type blockValidationCache struct {
+	receipts *types.Receipts
+	state    *state.StateDB
 }
 
 // NewConsensusAPI creates a new consensus api for the given backend.
 // The underlying blockchain needs to have a valid terminal total difficulty set.
 func NewBlockValidationAPI(eth *eth.Ethereum, accessVerifier *AccessVerifier, useBalanceDiffProfit, excludeWithdrawals bool) *BlockValidationAPI {
+	bc := eth.BlockChain()
 	return &BlockValidationAPI{
 		eth:                  eth,
 		accessVerifier:       accessVerifier,
 		useBalanceDiffProfit: useBalanceDiffProfit,
 		excludeWithdrawals:   excludeWithdrawals,
+		profProcessor:        core.NewProfProcessor(bc.Config(), bc, bc.Engine()),
+		profCache:            make(map[common.Hash]blockValidationCache),
 	}
 }
 
@@ -230,7 +242,9 @@ func (r *BuilderBlockValidationRequestV3) UnmarshalJSON(data []byte) error {
 }
 
 type ProfSimReq struct {
-	PbsPayload            *builderApiDeneb.ExecutionPayloadAndBlobsBundle
+	PbsPayload *builderApiDeneb.ExecutionPayloadAndBlobsBundle
+	// PbsReceipts           *types.Receipts
+	// PbsUsedGas            uint64
 	ProfBundle            *ProfBundleRequest
 	ParentBeaconBlockRoot common.Hash `json:"parent_beacon_block_root"`
 	RegisteredGasLimit    uint64      `json:"registered_gas_limit,string"`
@@ -254,6 +268,7 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 	log.Info(params.PbsPayload.String())
 
 	payload := params.PbsPayload.ExecutionPayload
+	baseBlockHash := common.Hash(payload.BlockHash)
 	blobsBundle := params.PbsPayload.BlobsBundle
 	profTransactionString := params.ProfBundle.Transactions
 	// convert hex prof transaction to bytes
@@ -263,29 +278,18 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 	}
 
 	log.Info("blobs bundle", "blobs", len(blobsBundle.Blobs), "commits", len(blobsBundle.Commitments), "proofs", len(blobsBundle.Proofs))
-
 	block, err := engine.ExecutionPayloadV3ToBlockProf(payload, profTransactionBytes, blobsBundle, params.ParentBeaconBlockRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	profValidationResp, err := api.validateProfBlock(block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
+	fmt.Printf("AppendProfBundle to blockHash %v\n", baseBlockHash)
+
+	profValidationResp, err := api.validateProfBlock(baseBlockHash, block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
 	if err != nil {
 		log.Error("invalid payload", "hash", block.Hash, "number", block.NumberU64(), "parentHash", block.ParentHash, "err", err)
 		return nil, err
 	}
-
-	//TODO: this final check shouldn't be needed
-	profBlock, err := engine.ExecutionPayloadV3ToBlock(profValidationResp.ExecutionPayload.ExecutionPayload, profValidationResp.ExecutionPayload.BlobsBundle, params.ParentBeaconBlockRoot)
-	if err != nil {
-		log.Error("invalid profBlock", "err", err)
-		return nil, err
-	}
-
-	log.Info("PROF Append Result", "Value", profValidationResp.Value.String(), "ExecutionPayload", profValidationResp.ExecutionPayload, "blockhash", profBlock.Hash().String(), "transactionroot", profBlock.TxHash().String())
-
-	// // no need to validate blobs bundle for prof block as prof transactions do not support blobs
-	// // ret := map[string]interface{}{}
 
 	return profValidationResp, nil
 
@@ -319,14 +323,19 @@ func (api *BlockValidationAPI) ValidateBuilderSubmissionV3(params *BuilderBlockV
 
 // TODO : invalid profTransactions are not being filtered out currently, change the validateProfBlock method to pluck out the invalid transactions, blockhash would also change in that case
 
-func (api *BlockValidationAPI) validateProfBlock(profBlock *types.Block, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
+func (api *BlockValidationAPI) validateProfBlock(baseblockHash common.Hash, profBlock *types.Block, proposerFeeRecipient common.Address, registeredGasLimit uint64) (*ProfSimResp, error) {
 	log.Info("validateProfBlock method called!")
 
 	feeRecipient := common.BytesToAddress(proposerFeeRecipient[:])
 
 	var vmconfig vm.Config
 
-	value, header, err := api.eth.BlockChain().SimulateProfBlock(profBlock, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */)
+	bc := api.eth.BlockChain()
+	baseBlockData := api.profCache[baseblockHash]
+	receipts := baseBlockData.receipts
+	statedb := baseBlockData.state
+
+	value, header, err := bc.SimulateProfBlock(profBlock, feeRecipient, registeredGasLimit, vmconfig, true /* prof uses balance diff*/, true /* exclude withdrawals */, api.profProcessor, receipts, statedb)
 
 	if err != nil {
 		return nil, err
@@ -390,7 +399,7 @@ func (api *BlockValidationAPI) validateBlock(block *types.Block, msg *builderApi
 		vmconfig = vm.Config{Tracer: tracer}
 	}
 
-	err := api.eth.BlockChain().ValidatePayload(block, feeRecipient, expectedProfit, registeredGasLimit, vmconfig, api.useBalanceDiffProfit, api.excludeWithdrawals)
+	err, receipts, statedbObj := api.eth.BlockChain().ValidatePayloadProf(block, feeRecipient, expectedProfit, registeredGasLimit, vmconfig, api.useBalanceDiffProfit, api.excludeWithdrawals)
 	if err != nil {
 		return err
 	}
@@ -400,7 +409,8 @@ func (api *BlockValidationAPI) validateBlock(block *types.Block, msg *builderApi
 			return err
 		}
 	}
-
+	api.profCache[block.Hash()] = blockValidationCache{receipts: receipts, state: statedbObj}
+	fmt.Printf("Validated Block %v adding to cache\n", block.Hash())
 	log.Info("validated block", "hash", block.Hash(), "number", block.NumberU64(), "parentHash", block.ParentHash())
 	return nil
 }
