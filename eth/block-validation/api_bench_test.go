@@ -664,10 +664,12 @@ func BenchmarkAppendProfBundle(b *testing.B) {
 			RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
 			ProposerFeeRecipient:  testValidatorAddr,
 		}
-		for i := 0; i < b.N; i++ {
-			_, _ = api.AppendProfBundle(profRequest)
-		}
+		b.Run(fmt.Sprintf("numProfTxs %v", numProfTxs), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_, _ = api.AppendProfBundle(profRequest)
+			}
+		})
+		environ1.resetNonceMod()
 	}
-	// environ1.resetNonceMod()
 
 }
