@@ -507,7 +507,6 @@ func ExecutionPayloadV3ToBlock(payload *deneb.ExecutionPayload, blobsBundle *den
 }
 
 func ExecutionPayloadV3ToBlockProf(payload *deneb.ExecutionPayload, profTxs [][]byte, blobsBundle *denebapi.BlobsBundle, parentBeaconBlockRoot common.Hash) (*types.Block, error) {
-	fmt.Println("builder called ExecutionPayloadV3ToBlock")
 	txs := make([][]byte, len(payload.Transactions)+len(profTxs))
 	for i, txHexBytes := range payload.Transactions {
 		txs[i] = txHexBytes
