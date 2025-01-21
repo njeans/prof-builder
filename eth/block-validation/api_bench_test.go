@@ -18,7 +18,6 @@ import (
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/beacon/engine"
 	beaconEngine "github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -304,6 +303,7 @@ type BechmarkEnvironment struct {
 	tokenPairs []pair
 	users      *TestParticipants
 	nonceMod   []uint64
+	rng        *rand.Rand
 }
 
 func NewBenchmarkEnvironment(numTokenPairs int, numUsers int, numSearcher int) (*BechmarkEnvironment, error) {
@@ -311,11 +311,12 @@ func NewBenchmarkEnvironment(numTokenPairs int, numUsers int, numSearcher int) (
 		panic(fmt.Errorf("Multiple token pairs not impelented"))
 	}
 	var err error
-	rand.New(rand.NewSource(10))
+
 	deployerKey, err := crypto.ToECDSA(hexutil.MustDecode("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"))
 	if err != nil {
 		return nil, err
 	}
+	rng := rand.New(rand.NewSource(int64(12345)))
 
 	deployerAddress := crypto.PubkeyToAddress(deployerKey.PublicKey)
 	deployerTestAddress := common.HexToAddress("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
@@ -350,6 +351,7 @@ func NewBenchmarkEnvironment(numTokenPairs int, numUsers int, numSearcher int) (
 		tokenPairs: make([]pair, numTokenPairs),
 		users:      testParticipants,
 		nonceMod:   make([]uint64, numUsers+numSearcher),
+		rng:        rng,
 	}
 	for i := 0; i < numTokenPairs; i++ {
 		univ2FactoryA := NewTContract(simBackend, "testdata/univ2factory.abi", univ2FactoryA_Address)
@@ -430,7 +432,7 @@ func (e *BechmarkEnvironment) resetNonceMod() {
 
 func (e *BechmarkEnvironment) randomSwap() *types.Transaction {
 	numUsers := len(e.users.users)
-	userid := rand.Intn(numUsers)
+	userid := e.rng.Intn(numUsers)
 	user := e.users.users[userid]
 	pairId := 0
 	pair := e.tokenPairs[pairId]
@@ -454,7 +456,7 @@ func (e *BechmarkEnvironment) randomSwap() *types.Transaction {
 		maxAmt = int(userBalance.Div(userBalance, big.NewInt(3)).Int64())
 	}
 	minAmt := 1
-	amtIn := new(big.Int).Mul(bigEther, big.NewInt(int64(rand.Intn(maxAmt)+minAmt)))
+	amtIn := new(big.Int).Mul(bigEther, big.NewInt(int64(e.rng.Intn(maxAmt)+minAmt)))
 	userBalance.Sub(userBalance, amtIn)
 	nonce := e.getNonceMod(userid, true) + e.ethservice.TxPool().Nonce(user.address)
 	fmt.Printf("%x swap %v nonce %v\n", user.address, amtIn.Int64(), nonce)
@@ -467,7 +469,7 @@ func (e *BechmarkEnvironment) setupBuilderSubmission(api *BlockValidationAPI, bl
 	blockTxs = append(blockTxs, paymentTx)
 	e.ethservice.TxPool().Add(blockTxs, true, true, false)
 	parent := e.ethservice.BlockChain().CurrentHeader()
-	execData, err := assembleBlock(api, parent.Hash(), &engine.PayloadAttributes{
+	execData, err := assembleBlock(api, parent.Hash(), &beaconEngine.PayloadAttributes{
 		Timestamp:             parent.Time + 5,
 		SuggestedFeeRecipient: testValidatorAddr,
 		BeaconRoot:            &common.Hash{42},
