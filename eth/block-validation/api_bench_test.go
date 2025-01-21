@@ -622,7 +622,8 @@ func TestBenchmarkProf(t *testing.T) {
 func BenchmarkAppendProfBundle(b *testing.B) {
 	numUsers := 100
 	numBlockTxs := 30
-	numProfTxs := 10
+	minProfTxs := 2
+	maxProfTxs := 20
 	environ1, err := NewBenchmarkEnvironment(1, numUsers, 0)
 	if err != nil {
 		panic(err)
@@ -634,33 +635,38 @@ func BenchmarkAppendProfBundle(b *testing.B) {
 		blockTxs[i] = environ1.randomSwap()
 	}
 
-	profTxs := make([]string, numProfTxs)
-	for i := 0; i < numProfTxs; i++ {
-		tx := environ1.randomSwap()
-		txBytes, err := tx.MarshalBinary()
-		if err != nil {
-			panic(err)
-		}
-		profTxs[i] = fmt.Sprintf("0x%x", txBytes)
-	}
 	blockRequest, err := environ1.setupBuilderSubmission(api, blockTxs)
 	if err != nil {
 		panic(err)
 	}
-	profRequest := &ProfSimReq{
-		PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
-			ExecutionPayload: blockRequest.ExecutionPayload,
-			BlobsBundle:      blockRequest.BlobsBundle,
-		},
-		ProfBundle: &ProfBundleRequest{
-			Transactions: profTxs,
-		},
-		ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
-		RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
-		ProposerFeeRecipient:  testValidatorAddr,
-	}
-	for i := 0; i < b.N; i++ {
-		_, _ = api.AppendProfBundle(profRequest)
+	for numProfTxs := minProfTxs; numProfTxs <= maxProfTxs; numProfTxs++ {
+
+		profTxs := make([]string, numProfTxs)
+		for i := 0; i < numProfTxs; i++ {
+			tx := environ1.randomSwap()
+			txBytes, err := tx.MarshalBinary()
+			if err != nil {
+				panic(err)
+			}
+			profTxs[i] = fmt.Sprintf("0x%x", txBytes)
+		}
+		fmt.Printf("numProfTxs %v profTxs %v\n", numProfTxs, profTxs)
+
+		profRequest := &ProfSimReq{
+			PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
+				ExecutionPayload: blockRequest.ExecutionPayload,
+				BlobsBundle:      blockRequest.BlobsBundle,
+			},
+			ProfBundle: &ProfBundleRequest{
+				Transactions: profTxs,
+			},
+			ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
+			RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
+			ProposerFeeRecipient:  testValidatorAddr,
+		}
+		for i := 0; i < b.N; i++ {
+			_, _ = api.AppendProfBundle(profRequest)
+		}
 	}
 	// environ1.resetNonceMod()
 

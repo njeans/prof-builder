@@ -282,9 +282,6 @@ func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimRes
 	if err != nil {
 		return nil, err
 	}
-
-	fmt.Printf("AppendProfBundle to blockHash %v\n", baseBlockHash)
-
 	profValidationResp, err := api.validateProfBlock(baseBlockHash, block, params.ProposerFeeRecipient, params.RegisteredGasLimit)
 	if err != nil {
 		log.Error("invalid payload", "hash", block.Hash, "number", block.NumberU64(), "parentHash", block.ParentHash, "err", err)
@@ -341,7 +338,7 @@ func (api *BlockValidationAPI) validateProfBlock(baseblockHash common.Hash, prof
 		return nil, err
 	}
 	profBlockFinal := profBlock.WithSeal(header)
-	log.Info("validated prof block", "number", profBlockFinal.NumberU64(), "parentHash", profBlockFinal.ParentHash())
+	log.Info("validated prof block", "baseblockHash", baseblockHash, "number", profBlockFinal.NumberU64(), "parentHash", profBlockFinal.ParentHash())
 
 	valueBig := value.ToBig()
 
