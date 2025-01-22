@@ -260,6 +260,7 @@ type ProfBundleRequest struct {
 type ProfSimResp struct {
 	Value            *uint256.Int
 	ExecutionPayload *builderApiDeneb.ExecutionPayloadAndBlobsBundle
+	UsedGas          uint64
 }
 
 func (api *BlockValidationAPI) AppendProfBundle(params *ProfSimReq) (*ProfSimResp, error) {
@@ -350,7 +351,7 @@ func (api *BlockValidationAPI) validateProfBlock(baseblockHash common.Hash, prof
 		return nil, err
 	}
 
-	return &ProfSimResp{value, payload}, nil
+	return &ProfSimResp{value, payload, header.GasUsed}, nil
 
 	// return &ProfSimResp{uint256.NewInt(0), phase0.Hash32(block.Hash())}, nil
 

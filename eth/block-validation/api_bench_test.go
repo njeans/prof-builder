@@ -451,12 +451,13 @@ func (e *BechmarkEnvironment) randomSwap() *types.Transaction {
 		factory = pair.univ2FactoryB.address
 		userBalance = user.tokenBalances[pairId].tokenBBalance
 	}
-	maxAmt := 50
-	if userBalance.Cmp(big.NewInt(int64(maxAmt))) == -1 {
-		maxAmt = int(userBalance.Div(userBalance, big.NewInt(3)).Int64())
-	}
-	minAmt := 1
-	amtIn := new(big.Int).Mul(bigEther, big.NewInt(int64(e.rng.Intn(maxAmt)+minAmt)))
+	// maxAmt := 5
+	// if userBalance.Cmp(big.NewInt(int64(maxAmt))) == -1 {
+	// maxAmt = int(userBalance.Int64()) //int(userBalance.Div(userBalance, big.NewInt(3)).Int64())
+	// }
+	// minAmt := 1
+	// fmt.Println("max", maxAmt)
+	amtIn := new(big.Int).Mul(bigEther, big.NewInt(1))
 	userBalance.Sub(userBalance, amtIn)
 	nonce := e.getNonceMod(userid, true) + e.ethservice.TxPool().Nonce(user.address)
 	fmt.Printf("%x swap %v nonce %v\n", user.address, amtIn.Int64(), nonce)
@@ -670,6 +671,67 @@ func BenchmarkAppendProfBundle(b *testing.B) {
 			}
 		})
 		environ1.resetNonceMod()
+	}
+
+}
+
+func BenchmarkAppendProfBundleTime(_ *testing.B) {
+	numUsers := 100
+	numTrails := 100
+	numRep := 1
+	numBlockTxs := 30
+	minProfTxs := 2
+	maxProfTxs := 20
+	environ1, err := NewBenchmarkEnvironment(1, numUsers, 0)
+	if err != nil {
+		panic(err)
+	}
+	api := NewBlockValidationAPI(environ1.ethservice, nil, true, false)
+
+	for numProfTxs := minProfTxs; numProfTxs <= maxProfTxs; numProfTxs++ {
+		for j := 0; j < numTrails; j++ {
+			blockTxs := make([]*types.Transaction, numBlockTxs)
+			for i := 0; i < numBlockTxs; i++ {
+				blockTxs[i] = environ1.randomSwap()
+			}
+
+			profTxs := make([]string, numProfTxs)
+			for i := 0; i < numProfTxs; i++ {
+				tx := environ1.randomSwap()
+				txBytes, err := tx.MarshalBinary()
+				if err != nil {
+					panic(err)
+				}
+				profTxs[i] = fmt.Sprintf("0x%x", txBytes)
+			}
+
+			blockRequest, err := environ1.setupBuilderSubmission(api, blockTxs)
+			if err != nil {
+				panic(err)
+			}
+			profRequest := &ProfSimReq{
+				PbsPayload: &builderApiDeneb.ExecutionPayloadAndBlobsBundle{
+					ExecutionPayload: blockRequest.ExecutionPayload,
+					BlobsBundle:      blockRequest.BlobsBundle,
+				},
+				ProfBundle: &ProfBundleRequest{
+					Transactions: profTxs,
+				},
+				ParentBeaconBlockRoot: blockRequest.ParentBeaconBlockRoot,
+				RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
+				ProposerFeeRecipient:  testValidatorAddr,
+			}
+			for i := 0; i < numRep; i++ {
+				start := time.Now()
+				resp, err := api.AppendProfBundle(profRequest)
+				if err != nil {
+					panic(err)
+				}
+				duration := time.Since(start)
+				fmt.Printf("data:%v,%v,%v,%v,%v\n", j, i, numProfTxs, resp.UsedGas, duration.Nanoseconds())
+			}
+			environ1.resetNonceMod()
+		}
 	}
 
 }
