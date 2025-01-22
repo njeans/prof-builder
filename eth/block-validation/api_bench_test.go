@@ -677,8 +677,7 @@ func BenchmarkAppendProfBundle(b *testing.B) {
 
 func BenchmarkAppendProfBundleTime(_ *testing.B) {
 	numUsers := 100
-	numTrails := 100
-	numRep := 1
+	numTrails := 1000
 	numBlockTxs := 30
 	minProfTxs := 2
 	maxProfTxs := 20
@@ -721,15 +720,14 @@ func BenchmarkAppendProfBundleTime(_ *testing.B) {
 				RegisteredGasLimit:    blockRequest.RegisteredGasLimit,
 				ProposerFeeRecipient:  testValidatorAddr,
 			}
-			for i := 0; i < numRep; i++ {
-				start := time.Now()
-				resp, err := api.AppendProfBundle(profRequest)
-				if err != nil {
-					panic(err)
-				}
-				duration := time.Since(start)
-				fmt.Printf("data:%v,%v,%v,%v,%v\n", j, i, numProfTxs, resp.UsedGas, duration.Nanoseconds())
+			start := time.Now()
+			resp, err := api.AppendProfBundle(profRequest)
+			if err != nil {
+				panic(err)
 			}
+			duration := time.Since(start)
+			fmt.Printf("data:%v,%v,%v,%v\n", j, numProfTxs, resp.UsedGas, duration.Nanoseconds())
+
 			environ1.resetNonceMod()
 		}
 	}
