@@ -24,10 +24,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	api := blockValidation.NewBlockValidationAPI(environ1.Ethservice, nil, true, false)
 
 	for numProfTxs := minProfTxs; numProfTxs <= maxProfTxs; numProfTxs++ {
 		for j := 0; j < numTrails; j++ {
+			api := blockValidation.NewBlockValidationAPI(environ1.Ethservice, nil, true, false)
 			blockTxs := make([]*types.Transaction, numBlockTxs)
 			for i := 0; i < numBlockTxs; i++ {
 				blockTxs[i] = environ1.RandomSwap()
