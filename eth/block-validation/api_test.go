@@ -35,7 +35,6 @@ import (
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
-	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
@@ -683,29 +682,6 @@ func startEthService(t *testing.T, genesis *core.Genesis, blocks []*types.Block)
 	return n, ethservice
 }
 
-func assembleBlock(api *BlockValidationAPI, parentHash common.Hash, params *engine.PayloadAttributes) (*engine.ExecutableData, error) {
-	args := &miner.BuildPayloadArgs{
-		Parent:       parentHash,
-		Timestamp:    params.Timestamp,
-		FeeRecipient: params.SuggestedFeeRecipient,
-		GasLimit:     params.GasLimit,
-		Random:       params.Random,
-		Withdrawals:  params.Withdrawals,
-		BeaconRoot:   params.BeaconRoot,
-	}
-
-	payload, err := api.eth.Miner().BuildPayload(args)
-	if err != nil {
-		return nil, err
-	}
-
-	if payload := payload.ResolveFull(); payload != nil {
-		return payload.ExecutionPayload, nil
-	}
-
-	return nil, errors.New("payload did not resolve")
-}
-
 func TestBlacklistLoad(t *testing.T) {
 	file, err := os.CreateTemp(".", "blacklist")
 	require.NoError(t, err)
@@ -816,43 +792,6 @@ func ExecutableDataToExecutionPayloadV2(data *engine.ExecutableData) (*capella.E
 		BlockHash:     [32]byte(data.BlockHash),
 		Transactions:  transactionData,
 		Withdrawals:   withdrawalData,
-	}, nil
-}
-
-func ExecutableDataToExecutionPayloadV3(data *engine.ExecutableData) (*deneb.ExecutionPayload, error) {
-	transactionData := make([]bellatrix.Transaction, len(data.Transactions))
-	for i, tx := range data.Transactions {
-		transactionData[i] = bellatrix.Transaction(tx)
-	}
-
-	withdrawalData := make([]*capella.Withdrawal, len(data.Withdrawals))
-	for i, withdrawal := range data.Withdrawals {
-		withdrawalData[i] = &capella.Withdrawal{
-			Index:          capella.WithdrawalIndex(withdrawal.Index),
-			ValidatorIndex: phase0.ValidatorIndex(withdrawal.Validator),
-			Address:        bellatrix.ExecutionAddress(withdrawal.Address),
-			Amount:         phase0.Gwei(withdrawal.Amount),
-		}
-	}
-
-	return &deneb.ExecutionPayload{
-		ParentHash:    [32]byte(data.ParentHash),
-		FeeRecipient:  [20]byte(data.FeeRecipient),
-		StateRoot:     [32]byte(data.StateRoot),
-		ReceiptsRoot:  [32]byte(data.ReceiptsRoot),
-		LogsBloom:     types.BytesToBloom(data.LogsBloom),
-		PrevRandao:    [32]byte(data.Random),
-		BlockNumber:   data.Number,
-		GasLimit:      data.GasLimit,
-		GasUsed:       data.GasUsed,
-		Timestamp:     data.Timestamp,
-		ExtraData:     data.ExtraData,
-		BaseFeePerGas: uint256.MustFromBig(data.BaseFeePerGas),
-		BlockHash:     [32]byte(data.BlockHash),
-		Transactions:  transactionData,
-		Withdrawals:   withdrawalData,
-		BlobGasUsed:   *data.BlobGasUsed,
-		ExcessBlobGas: *data.ExcessBlobGas,
 	}, nil
 }
 
